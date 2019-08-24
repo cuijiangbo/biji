@@ -1,0 +1,96 @@
+%
+###############################################################################
+DNS服务器
+	bind        		//域名服务包
+	bind-chroot 		//提供虚拟根支持,牢笼政策
+	named				//系统服务
+	TCP/UDP 53			//默认端口		
+	/var/named/chroot/	//运行时的虚拟根环境
+	/etc/named.conf		//主配置文件,设置负责解析域名
+	/var/named/			//地址库文件,记录域名与IP地址对应关系
+   
+	vim /etc/named.conf      
+	options {
+		directory     "/var/named";
+        	recursion no;    				//禁止DNS递归查询
+D	zone "qq.com" IN {				//负责解析的域名
+		type master;				//类型为主DNS服务器
+		file "qq.com.zone";};			//地址库文件名称
+	
+	cp -p /var/named/named.localhost  /var/named/qq.com.zone
+	vim /var/named/qq.com.zone    
+	qq.com.	NS	svr7
+ 	bj.qq.com.	NS	pc207
+ 	svr7		A	192.168.4.7
+ 	pc207		A	192.168.4.207
+ 	*		A	1.1.1.1			//泛域名解析
+	tts		CNAME	*				//解析记录的别名
+	$GENERATE 1-50 pc$ A 192.168.1.$		//有规律的泛域名解析
+
+	nslookup www.qq.com 192.168.4.7
+
+###############################################################################
+综合实验
+
+虚拟机B:
+	yum -y install httpd
+	vim /etc/httpd/conf.d/1.conf
+	<VirtualHost *:80>
+  		ServerName www.tedu.cn
+  		DocumentRoot /var/www/tedu
+	</VirtualHost>
+	<VirtualHost *:80>
+  		ServerName www.qq.com
+  		DocumentRoot /var/www/qq
+	</VirtualHost>
+	mkdir /var/www/tedu /var/www/qq
+	echo 'tedu'> /var/www/tedu/index.html 
+	echo 'qq' > /var/www/qq/index.html
+虚拟机A:
+	vim /var/named/tedu.cn.zone
+	tedu.cn.	NS	aa
+	aa		A 	192.168.1.6
+	www		A	1.1.1.1
+
+	vim /var/named/qq.com.zone 
+	qq.com.	NS	aa
+	aa		A	192.168.1.6
+	www		A	2.2.2.2
+虚拟机C:
+	echo nameserver 192.168.1.6 > /etc/resolv.conf 
+	nslookup www.qq.com
+	nslookup www.tedu.cn
+
+###################################################################################
+###################################################################################
+多区域的分离解析(视图解析)		能够区分客户机的来源地址,为不同类别的客户机提供不同的解析结果
+
+	192.168.1.7		www.qq.com----> 1.2.3.4	www.tedu.cn----> 10.20.30.40
+	其他地址		www.qq.com----> 1.1.1.1	www.tedu.cn----> 10.10.10.10
+
+	vim /etc/named.conf
+	options {
+		directory        "/var/named"; };
+	acl   ooo  {  192.168.1.7 };			//为客户端建立地址列表	
+	view "xxx" {					//view中zone的个数及域名要一致
+		match-clients {  ooo;  };		//匹配客户端来源地址
+	   zone "tedu.cn" IN {
+		type master;
+		file "tedu.cn.zone"; };
+	   zone "qq.com" IN {
+		type master;
+		file "qq.com.zone"; };};
+	view "yyy" {
+		match-clients {  any;  };
+	   zone "tedu.cn" IN {
+		type master;
+		file "tedu.cn.other"; };
+	   zone "qq.com" IN {
+		type master;
+		file "qq.com.other"; };};
+	建立不同地址库文件
+
+#####################################################################################
+#####################################################################################
+#####################################################################################
+

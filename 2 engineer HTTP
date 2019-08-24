@@ -1,0 +1,65 @@
+%
+################################################################################
+HTTP服务基础
+
+默认配置
+	Listen			//监听地址:端口(80)
+  	ServerName			//本站点注册的DNS名称
+  	DocumentRoot		//网页根目录(/var/www/html)
+  	DirectoryIndex		//首页文件名(index.html)
+
+虚拟Web主机				三种模式:	域名	端口	IP地址
+
+  	/etc/httpd/conf/httpd.conf			//真实web配置文件路径
+  	/etc/httpd/conf.d/*.conf				//虚拟web配置文件路径
+
+基于域名的虚拟Web
+	<VirtualHost  IP地址:端口>
+		ServerName   网站的DNS名称
+   		DocumentRoot 网站网页根目录
+ 	</VirtualHost>
+
+网页访问控制
+	<Directory 目录的绝对路径>				//针对路径
+   		Require all denied|granted		//拒绝和允许所有
+   		Require ip IP				//仅允许IP
+	</Directory>
+
+根目录下的网站要修改安全上下文
+	chcon -R  --reference=/var/www  /ooo		//修改文件的安全上下文 -R递归所有
+	ls -Zd /ooo						//查看目录标签值
+
+部署动态网站,修改端口为 888
+	yum -y install mod_wsgi				//python解释包
+	vim /etc/httpd/conf.d/*.conf
+	listen  888	
+	<VirtualHost *:888>
+  		ServerName    www.aaa.com
+  		DocumentRoot  /var/www/ooo
+		WsgiScriptAlias / /var/www/ooo/xxx.wsgi
+	</VirtualHost>
+	semanage fcontext -l				//查询默认目录的安全上下文
+ 	semanage port -l | grep http			//查询当前的http端口 -l查询
+ 	semanage port -a -t http_port_t -p tcp 888	//-a添加  -t类型  -p协议 -m修改
+	systemctl restart httpd
+	curl  www.aaa.com:888
+
+################################################################################
+安全Web
+	yum -y install mod_ssl							//支持加密软件
+	cd  /etc/pki/tls/certs/
+	wget http://classroom.example.com/pub/tls/certs/server0.crt	//部署网站证书
+	wget http://classroom.example.com/pub/example-ca.crt		//部署根证书
+	cd  /etc/pki/tls/private/
+	wget http://classroom.example.com/pub/tls/private/server0.key	//部署私钥
+
+	vim  /etc/httpd/conf.d/ssl.conf
+59 行	DocumentRoot  "/var/www/html"
+60 行	ServerName    server0.example.com:443
+100 行	SSLCertificateFile  /etc/pki/tls/certs/server0.crt		//指定网站证书
+107 行	SSLCertificateKeyFile /etc/pki/tls/private/server0.key		//指定密钥
+122 行	SSLCACertificateFile /etc/pki/tls/certs/example-ca.crt 		//指定根证书
+
+	firefox  https://server0.example.com
+
+#################################################################################
