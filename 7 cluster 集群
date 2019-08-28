@@ -1,0 +1,633 @@
+%
+####################################################################################
+lvs原理就是路由转发+调度
+	director server  		//调度器服务器
+	real server      		//真实服务器
+	VIP              		//虚拟IP地址
+	RIP              		//真实IP地址
+	DIP              		//调度器节点服务器的IP地址
+
+lvs工作模式
+	VS-NAT			//nat模式,地址和端口转换,效率低
+	VS-TUN			//IP隧道模式
+	DR				//直连路由模式,性能最高,不能跨越vlan
+
+lvs调度算法(公10种算法）
+	轮询（rr）			//依次将请求调度不同的服务器
+	加权轮询（wrr）		//可以解决服务器间性能不一的情况
+	最少连接（lc）		//把新的连接请求分配到当前连接数最小的服务器
+	加权最少连接（wlc）		//调度新连接时尽可能使服务器的已建立连接数和其权值成比例
+
+ipvsadm命令选项
+	ipvsadm -C			//清空所有
+	ipvsadm -Ln			//查看LVS规则表
+	ipvsadm -s			//指定集群算法
+	ipvsadm -A -t|u 192.168.4.5:80 -s [算法]		//添加虚拟服务器
+	ipvsadm -E -t|u 192.168.4.5:80 -s [算法]		//修改虚拟服务器
+	ipvsadm -D -t|u 192.168.4.5:80 -s [算法]		//删除虚拟服务器
+	ipvsadm -a -t|u 192.168.4.5:80 -r 192.168.2.100 [g|i|m] [权重] //添加真实服务器
+	ipvsadm -e -t|u 192.168.4.5:80 -r 192.168.2.100 [g|i|m] [权重]	//修改真实服务器
+	ipvsadm -d -t|u 192.168.4.5:80 -r 192.168.2.100 [g|i|m] [权重]	//删除真实服务器
+								-g(DR模式)	-i(隧道模式)	-m(NAT模式)
+	ipvsadm-save -n > /etc/sysconfig/ipvsadm-config			//永久生效
+
+####################################################################################
+ipvsadm命令用法
+
+	yum -y install ipvsadm
+	ipvsadm -A -t 192.168.4.5:80 -s wrr				//创建虚拟服务器
+
+为集群添加若干real server
+	ipvsadm -a -t 192.168.4.5:80 -r 192.168.2.100 -m -w 1
+	ipvsadm -a -t 192.168.4.5:80 -r 192.168.2.200 -m -w 1
+	ipvsadm-save -n > /etc/sysconfig/ipvsadm-config		//永久生效
+	ipvsadm -E -t 192.168.4.5:80 -s rr				//修改集群服务器
+	ipvsadm -Ln								//查看LVS状态
+
+######################################################################################
+部署LVS-NAT集群
+
+	设置Web服务器
+	
+4.5	echo 1 > /proc/sys/net/ipv4/ip_forward			//临时有效
+	echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf	//永久有效
+	yum -y install ipvsadm
+	ipvsadm -A -t 192.168.4.5:80 -s wrr				//创建虚拟服务器
+	ipvsadm -a -t 192.168.4.5:80 -r 192.168.2.100 -m -w 1	//添加真实服务器
+	ipvsadm -a -t 192.168.4.5:80 -r 192.168.2.200 -m -w 1
+	ipvsadm-save -n > /etc/sysconfig/ipvsadm			//查看规则列表，并保存规则
+	curl  http://192.168.4.5						//客户端测试
+
+####################################################################################
+部署LVS-DR集群
+
+准备环境
+ 	client    eth0     192.168.4.10/24
+ 	proxy     eth0     192.168.4.5/24       eth0:0   192.168.4.15/24
+ 	web1      eth0     192.168.4.100/24     lo:0     192.168.4.15/32
+ 	web2      eth0     192.168.4.200/24     lo:0     192.168.4.15/32
+
+配置实验网络环境
+设置代理服务器的VIP和DIP（为了防止冲突，VIP必须要配置在网卡的虚拟接口！）
+	cd  /etc/sysconfig/network-scripts/
+	cp  ifcfg-eth0    ifcfg-eth0:0
+	vim ifcfg-eth0:0
+	TYPE=Ethernet
+	BOOTPROTO=none
+	DEFROUTE=yes
+	NAME=eth0:0
+	DEVICE=eth0:0
+	ONBOOT=yes
+	IPADDR=192.168.4.15
+	PREFIX=24
+
+	systemctl restart network
+	如果服务起不来
+	systemctl stop NetworkManager
+
+设置Web1,web2服务器网络参数
+	cd  /etc/sysconfig/network-scripts/
+	cp  ifcfg-lo   ifcfg-lo:0
+	vim ifcfg-lo:0
+	DEVICE=lo:0
+	IPADDR=192.168.4.15
+	NETMASK=255.255.255.255
+	NETWORK=192.168.4.15
+	BROADCAST=192.168.4.15
+	ONBOOT=yes
+	NAME=lo:0
+
+防止地址冲突
+	vim /etc/sysctl.conf
+	net.ipv4.conf.all.arp_ignore = 1
+	net.ipv4.conf.lo.arp_ignore = 1
+	net.ipv4.conf.lo.arp_announce = 2
+	net.ipv4.conf.all.arp_announce = 2
+
+	sysctl -p					//从配置文件加载内核参数设置
+	systemctl stop NetworkManager
+	systemctl restart network
+
+配置后端Web服务器
+
+部署LVS-DR模式调度器
+	yum -y install ipvsadm
+ 	ipvsadm -C
+ 	ipvsadm -A -t 192.168.4.15:80 -s wrr
+ 	ipvsadm -a -t 192.168.4.15:80 -r 192.168.4.100 -g -w 1
+ 	ipvsadm -a -t 192.168.4.15:80 -r 192.168.4.200 -g -w 1
+	ipvsadm -Ln
+	ipvsadm-save -n > /etc/sysconfig/ipvsadm
+
+	curl http://192.168.4.15
+
+#######################################################################################
+#######################################################################################
+#######################################################################################
+Keepalived高可用服务器
+
+	yum install -y keepalived		(web1,web2)
+部署Keepalived服务	(web1.web2)
+	vim /etc/keepalived/keepalived.conf
+	router_id  web1					//设置路由ID
+	virtual_ipaddress {				//谁是主服务器谁获得该VIP
+	192.168.4.80
+修改web2配置文件
+ 	vim /etc/keepalived/keepalived.conf
+ 	router_id  web2					//设置路由ID
+ 	state BACKUP					//备服务器为BACKUP
+ 	priority 50						//服务器优先级
+ 	virtual_ipaddress {				//谁是主服务器谁配置VIP
+ 	192.168.4.80 
+
+	systemctl start keepalived			//启动服务(web1,web2)
+ 	iptables -F						//清空防火墙规则
+ 	setenforce 0
+
+ 	curl  http://192.168.4.80
+
+########################################################################################
+Keepalived+LVS服务器
+
+配置网络环境
+	client	eth0		192.168.4.10/24
+	proxy		eth0		192.168.4.5/24
+	proxy2	eth0		192.168.4.6/24
+	web1		eth0		192.168.4.100/24
+	web2		eth0		192.168.4.200/24
+
+web1,web2配置VIP地址和后台web服务
+	cd /etc/sysconfig/network-scripts/
+	cp ifcfg-lo   ifcfg-lo:0
+	vim  ifcfg-lo:0
+	DEVICE=lo:0
+	IPADDR=192.168.4.15
+	NETMASK=255.255.255.255
+	NETWORK=192.168.4.15
+	BROADCAST=192.168.4.15
+	ONBOOT=yes
+	NAME=lo:0
+
+防止地址冲突
+	vim /etc/sysctl.conf
+	net.ipv4.conf.all.arp_ignore = 1
+	net.ipv4.conf.lo.arp_ignore = 1
+	net.ipv4.conf.lo.arp_announce = 2
+	net.ipv4.conf.all.arp_announce = 2
+
+	sysctl -p
+	systemctl stop NetworkManager
+	systemctl restart network
+
+	yum install -y keepalived  ipvsadm	(proxy1,proxy2)
+LVS1设置Keepalived
+	vim  /etc/keepalived/keepalived.conf
+	global_defs {
+	      notification_email {
+	      admin@tarena.com.cn}				//设置报警收件人邮箱
+	      notification_email_from ka@localhost		//设置发件人
+	      smtp_server 127.0.0.1				//定义邮件服务器
+	      smtp_connect_timeout 30
+	      router_id  lvs1 }					//设置路由ID号(实验需要修改)
+	vrrp_instance VI_1 {
+	      state MASTER					//主服务器为MASTER
+	      interface eth0					//定义网络接口
+	      virtual_router_id 50				//主辅VRID号必须一致
+	      priority 100					//服务器优先级
+	      advert_int 1
+	      authentication {
+	      auth_type pass
+	      auth_pass 1111 }					//主辅服务器密码必须一致
+	virtual_ipaddress {					//配置VIP（实验需要修改）
+	        192.168.4.15 }}
+	virtual_server 192.168.4.15 80 {			//设置ipvsadm的VIP规则（实验需要修改）
+      	delay_loop 6
+      	lb_algo wrr						//设置LVS调度算法为WRR
+      	lb_kind DR						//设置LVS的模式为DR
+      	#persistence_timeout 50				//开启后在一定时间内始终访问相同服务器
+      	protocol TCP
+	real_server 192.168.4.100 80 {				//设置后端web服务器真实IP（实验需要修改）
+		weight 1						//设置权重为1
+		TCP_CHECK {						//对后台real_server做健康检查
+	                 connect_timeout 3
+	                 nb_get_retry 3
+	                 delay_before_retry 3 }}
+	real_server 192.168.4.200 80 {				//设置后端web服务器真实IP（实验需要修改）
+	       weight 2						//设置权重为2
+	       TCP_CHECK {
+	                  connect_timeout 3
+	                  nb_get_retry 3
+	                  delay_before_retry 3 }}}
+	systemctl start keepalived
+	iptables -F
+LVS2调度器设置Keepalived
+ 	vim /etc/keepalived/keepalived.conf
+ 	router_id   lvs2
+ 	state     BACKUP
+ 	priority  50
+
+	systemctl start keepalived
+	iptables -F
+
+	curl  http://192.168.4.15
+
+###########################################################################################
+配置HAProxy负载平衡
+
+配置后端Web服务器 (web1,web2)
+
+4.5	yum -y install haproxy
+	vim /etc/haproxy/haproxy.cfg
+	listen  webserver  *:80
+		balance roundrobin
+			server  web1 192.168.2.100:80 check inter 2000 rise 2 fall 5
+			server  web2 192.168.2.200:80 check inter 2000 rise 2 fall 5
+
+	listen stats 0.0.0.0:1080					//监听端口
+		stats refresh 30s						//统计页面自动刷新时间
+			stats uri /stats                		//统计页面url
+			stats realm Haproxy Manager			//进入管理解面查看状态信息
+			stats auth admin:admin				//统计页面用户名和密码设置
+
+	systemctl start haproxy
+	systemctl enable haproxy
+
+	firefox  http://192.168.4.5
+	firefox  http://192.168.4.5:1080/stats
+
+##########################################################################################
+##########################################################################################
+##########################################################################################
+DAS存储（直连存储）
+NAS存储（网络附加存储）文件系统共享 nfs,samba
+SAN存储（存储区域网络）块共享 iscsi
+SDS分布式存储（软件定义存储）
+
+实验环境
+	client   eth0   192.168.4.10/24
+	node1    eth0   192.168.4.11/24
+	node2    eth0   192.168.4.12/24
+	node3    eth0   192.168.4.13/24
+
+步骤一：安装前准备
+1）真机为所有节点配置yum源服务器
+	mkdir  /var/ftp/ceph
+	mount ceph10.iso /var/ftp/ceph/
+2）配置无密码连接(包括自己远程自己也不需要密码)，在node1操作
+	ssh-keygen   -f /root/.ssh/id_rsa    -N ''
+	for i in 10  11  12  13
+	do
+	     ssh-copy-id  192.168.4.$i
+	done
+3）修改/etc/hosts并同步到所有主机
+	vim /etc/hosts
+	192.168.4.10     client
+	192.168.4.11     node1
+	192.168.4.12     node2
+	192.168.4.13     node3
+
+	for i in 10  11  12  13
+	do
+	    scp  /etc/hosts  192.168.4.$i:/etc/
+	done
+4）修改所有节点都需要配置YUM源，并同步到所有主机
+	vim /etc/yum.repos.d/ceph.repo
+	[mon]
+	name=mon
+	baseurl=ftp://192.168.4.254/ceph/MON
+	gpgcheck=0
+	[osd]
+	name=osd
+	baseurl=ftp://192.168.4.254/ceph/OSD
+	gpgcheck=0
+	[tools]
+	name=tools
+	baseurl=ftp://192.168.4.254/ceph/Tools
+	gpgcheck=0
+	
+	for i in  10  11  12  13
+	do
+	    scp  /etc/yum.repos.d/ceph.repo  192.168.4.$i:/etc/yum.repos.d/
+	done
+5）所有节点主机与真实主机的NTP服务器同步时间
+	vim /etc/chrony.conf
+	server 192.168.4.254   iburst
+	
+	for i in 10 11 12 13
+	do
+	     scp /etc/chrony.conf    192.168.4.$i:/etc/
+	     ssh 192.168.4.$i "systemctl restart chronyd"
+	done
+
+步骤二：准备存储磁盘（图形添加三个20G硬盘）
+
+############################################################################################
+部署ceph集群
+
+步骤一：安装部署软件ceph-deploy（node1）
+1）在node1安装部署工具，学习工具的语法格式
+	yum -y install ceph-deploy
+2）创建目录
+	mkdir ceph-cluster
+	cd /root/ceph-cluster
+
+步骤二：部署Ceph集群(node1)
+1）创建Ceph集群配置,在ceph-cluster目录下生成Ceph配置文件
+	ceph-deploy new node1 node2 node3
+2）给所有节点安装ceph相关软件包。
+	for i in node1 node2 node3
+	do
+	    ssh  $i "yum -y install ceph-mon ceph-osd ceph-mds ceph-radosgw"
+	done 
+3）初始化所有节点的mon服务，也就是启动mon服务
+	ceph-deploy mon create-initial
+
+步骤三：创建OSD(node1)
+1) vdb1和vdb2这两个分区用来做存储服务器的journal缓存盘
+	for i in node1 node2 node3
+	do
+	     ssh $i "parted /dev/vdb mktable gpt"
+	     ssh $i "parted /dev/vdb mkpart primary 1 50%"
+	     ssh $i "parted /dev/vdb mkpart primary 50% 100%"
+	 done
+2）磁盘分区后的默认权限无法让ceph软件对其进行读写操作，需要修改权限
+	for  i  in  node1  node2  node3
+	do
+	    ssh  $i "chown  ceph.ceph  /dev/vdb1"
+	    ssh  $i "chown  ceph.ceph  /dev/vdb2" 
+	done
+	#上面的权限修改为临时操作，重启计算机后，权限会再次被重置。
+	#我们还需要将规则写到配置文件实现永久有效
+	vim /etc/udev/rules.d/70-vdb.rules
+	ENV{DEVNAME}=="/dev/vdb1",OWNER="ceph",GROUP="ceph"
+	ENV{DEVNAME}=="/dev/vdb2",OWNER="ceph",GROUP="ceph"
+3）初始化清空磁盘数据（仅node1操作即可）
+	for  i  in  node1  node2  ndoe3
+	do 
+	    ssh  $i  "ceph-deploy disk  zap  node1:vdc   node1:vdd"
+	    ssh  $i  "ceph-deploy disk  zap  node2:vdc   node1:vdd"
+	    ssh  $i  "ceph-deploy disk  zap  node3:vdc   node1:vdd"
+	done
+4）创建OSD存储空间（仅node1操作即可）
+	ceph-deploy osd create node1:vdc:/dev/vdb1 node1:vdd:/dev/vdb2  
+	//创建osd存储设备，vdc为集群提供存储空间，vdb1提供JOURNAL缓存，
+	//一个存储设备对应一个缓存设备，缓存需要SSD，不需要很大
+	ceph-deploy osd create node2:vdc:/dev/vdb1 node2:vdd:/dev/vdb2
+	ceph-deploy osd create node3:vdc:/dev/vdb1 node3:vdd:/dev/vdb2 
+
+步骤四：验证测试
+1) 查看集群状态
+  	ceph  -s
+
+##############################################################################################
+创建Ceph块存储
+
+步骤一：创建镜像(node1)
+1）查看存储池
+	ceph osd lspools
+2）创建镜像、查看镜像
+	rbd create demo-image --image-feature  layering --size 10G       创建镜像
+	rbd create rbd/image --image-feature  layering --size 10G        
+	#这里的demo-image和image为创建的镜像名称，可以为任意字符
+	#--image-feature参数指定我们创建的镜像有哪些功能，layering是开启COW功能
+	#提示：ceph镜像支持很多功能，但很多是操作系统不支持的，我们只开启layering
+
+步骤二：动态调整
+1）缩小容量
+	rbd resize --size 7G image --allow-shrink
+  	rbd info image                     查看镜像
+2）扩容容量
+  	rbd resize --size 15G image
+
+步骤三：通过KRBD访问
+1）客户端通过KRBD访问(client)
+	yum -y  install ceph-common            	#客户端需要安装ceph-common软件包
+	scp   192.168.4.11:/etc/ceph/ceph.conf    /etc/ceph/
+	scp   192.168.4.11:/etc/ceph/ceph.client.admin.keyring   /etc/ceph/
+	rbd map image
+	lsblk
+	rbd showmapped
+2) 客户端格式化、挂载分区
+	mkfs.xfs /dev/rbd0
+	mount /dev/rbd0 /mnt/
+	echo "test" > /mnt/test.txt
+
+步骤四：创建镜像快照
+1) 查看镜像快照（默认所有镜像都没有快照）(node1)
+	rbd snap ls image
+2) 给镜像创建快照
+	rbd snap create image --snap image-snap1     #为image镜像创建快照，快照名称为image-snap1
+	rbd snap ls image
+3) 删除客户端写入的测试文件(client)
+	rm  -rf   /mnt/test.txt
+	umount  /mnt
+4) 还原快照(node1)
+	rbd snap rollback image --snap image-snap1   (node1)  
+	mount /dev/rbd0 /mnt/                        (client)#客户端重新挂载分区
+	ls  /mnt
+
+步骤四：创建快照克隆
+1) 查看镜像快照(node1)
+	rbd snap ls image
+2) 给镜像创建快照
+	rbd snap create image --snap image-snap1    	#为image镜像创建快照，快照名称为image-snap1
+	rbd snap ls image
+3) 删除客户端写入的测试文件(client)
+ 	rm  -rf   /mnt/test.txt
+ 	umount  /mnt
+4) 还原快照(node1)
+	rbd snap rollback image --snap image-snap1        #客户端重新挂载分区
+	mount /dev/rbd0 /mnt/
+	ls  /mnt
+
+步骤五：创建快照克隆
+1）克隆快照(node1)
+	rbd snap protect image --snap image-snap1      	 #快照保护
+	rbd snap rm image --snap image-snap1			 #删除会失败
+	rbd clone image --snap image-snap1 image-clone --image-feature layering
+	//使用image的快照image-snap1克隆一个新的名称为image-clone镜像
+2）查看克隆镜像与父镜像快照的关系
+	rbd info image-clone
+	#克隆镜像很多数据都来自于快照链
+	#如果希望克隆镜像可以独立工作，就需要将父快照中的数据，全部拷贝一份，但比较耗时！！！
+	rbd flatten image-clone
+	rbd info image-clone
+	#注意，父快照信息没了！
+	rbd snap unprotect image --snap image-snap1     	 #取消快照保护
+	rbd snap rm image --snap image-snap1           	 #可以删除快照
+
+步骤六：其他操作
+
+1） 客户端撤销磁盘映射（client）
+   	umount /mnt
+   	rbd showmapped
+   	rbd unmap /dev/rbd0
+
+#############################################################################################
+#############################################################################################
+#############################################################################################
+块存储应用案例
+
+步骤一
+1）创建磁盘镜像(node1)
+	rbd create vm1-image --image-feature  layering --size 10G
+	rbd  list
+	rbd  info  vm1-image
+
+2）Ceph认证账户（仅查看即可）
+	Ceph默认开启用户认证，客户端需要账户才可以访问，默认账户名称为client.admin，key是账户的密钥。
+	可以使用ceph auth添加新账户（案例我们使用默认账户）
+	vim /etc/ceph/ceph.conf                   		  		//配置文件 
+	[global]
+	mon_initial_members = node1, node2, node3
+	mon_host = 192.168.2.10,192.168.2.20,192.168.2.30
+	auth_cluster_required = cephx                       		//开启认证
+	auth_service_required = cephx           		  		//开启认证
+	auth_client_required = cephx                        		//开启认证
+
+	cat /etc/ceph/ceph.client.admin.keyring        	   		//账户文件
+
+3）创建KVM虚拟机（注意：这里使用真实机当客户端！！！）
+	使用virt-manager创建2台普通的KVM虚拟机。
+
+4）配置libvirt secret（注意：这里使用真实机当客户端！！！）
+	编写账户信息文件，让KVM知道ceph的账户名称。(真机)
+	vim secret.xml           			 			//新建临时文件，内容如下 
+	<secret ephemeral='no' private='no'>
+	        <usage type='ceph'>
+	                <name>client.admin secret</name>
+	        </usage>
+	</secret>                                    			//使用XML配置文件创建secret
+	
+	virsh secret-define secret.xml
+	733f0fd1-e3d6-4c25-a69f-6681fc19802b         			//随机的UUID，这个UUID对应的有账户信息
+
+5 ）给secret绑定admin账户的密码，密码参考ceph.client.admin.keyring文件
+	virsh secret-set-value \
+	--secret 733f0fd1-e3d6-4c25-a69f-6681fc19802b \  			//secret后面是之前创建的secret的UUID
+	--base64 AQBTsdRapUxBKRAANXtteNUyoEmQHveb75bISg  			//base64后面是client.admin账户的密码
+
+6）虚拟机的XML配置文件（真机）
+	每个虚拟机都会有一个XML配置文件，包括：虚拟机的名称、内存、CPU、磁盘、网卡等信息
+ 	vim /etc/libvirt/qemu/vm1.xml						//修改前内容如下
+	<disk type='file' device='disk'>
+      	<driver name='qemu' type='qcow2'/>
+      	<source file='/var/lib/libvirt/images/vm1.qcow2'/>
+      	<target dev='vda' bus='virtio'/>
+      	<address type='pci' domain='0x0000' bus='0x00' slot='0x07' function='0x0'/>
+	</disk>
+	不推荐直接使用vim修改配置文件，推荐使用virsh edit修改配置文件，效果如下
+	      virsh edit vm1  					 		//vm1为虚拟机名称
+	<disk type='network' device='disk'>
+	      <driver name='qemu' type='raw'/>
+	      <auth username='admin'> 
+	      <secret type='ceph' uuid='733f0fd1-e3d6-4c25-a69f-6681fc19802b'/>
+	      </auth>
+	      <source protocol='rbd' name='rbd/vm1-image'><host name='192.168.4.11' port='6789'/></source>
+	      <target dev='vda' bus='virtio'/>
+	      <address type='pci' domain='0x0000' bus='0x09' slot='0x08' function='0x0'/>
+	</disk>
+	注意：如果有设备编号冲突的情况下，需要修改设备编号，任意修改一个数字即可
+
+##############################################################################################
+Ceph文件系统
+
+环境准备
+	新加一台虚拟机   node4       192.168.4.14
+
+步骤一
+1）部署元数据服务器（node4）
+	yum -y install ceph-mds 
+	登陆node1部署节点操作(node1)
+	cd  /root/ceph-cluster					//该目录，是最早部署ceph集群时，创建的目录
+	ceph-deploy mds create node4				//给nod4拷贝配置文件，启动mds服务
+	同步配置文件和key(node1)
+	ceph-deploy admin node4
+
+2）创建存储池
+	ceph osd pool create cephfs_data 128			//创建存储池，对应128个PG
+	ceph osd pool create cephfs_metadata 128		//创建存储池，对应128个PG
+
+3）创建Ceph文件系统
+   	ceph mds stat                     			//查看mds状态
+	ceph fs new myfs1 cephfs_metadata cephfs_datav new fs with metadata pool 2 and data pool 1
+	//注意，先写medadata池，再写data池 (默认，只能创建1个文件系统，多余的会报错)
+   	ceph fs ls
+   	ceph mds stat
+6）客户端挂载(client)
+	mount -t ceph 192.168.4.11:6789:/  /mnt/cephfs/ -o \
+	name=admin,secret=AQBTsdRapUxBKRAANXtteNUyoEmQHveb75bISg==
+	//注意:文件系统类型为ceph,192.168.4.11为MON节点的IP（不是MDS节点）
+	//admin是用户名,secret是密钥,密钥可以在/etc/ceph/ceph.client.admin.keyring中找到
+
+##################################################################################################
+创建对象存储服务器
+
+环境准备
+	新加一台虚拟机   node5       192.168.4.15
+
+步骤一：部署对象存储服务器
+
+1）部署RGW软件包(node5)
+	ceph-deploy install --rgw node5
+	同步配置文件与密钥到node5(node1)
+	cd /root/ceph-cluster
+	ceph-deploy admin node5
+2）新建网关实例,启动一个rgw服务(node1)
+	ceph-deploy rgw create node5
+
+	登陆node5验证服务是否启动(node5)
+	ps aux |grep radosgw
+	systemctl  status ceph-radosgw@\*
+
+3）修改服务端口(node5)
+	登陆node5，RGW默认服务端口为7480，修改为8000或80更方便客户端记忆和使用
+	vim  /etc/ceph/ceph.conf
+	[client.rgw.node5]
+	host = node5					//node5为主机名
+	rgw_frontends = "civetweb port=8000"		//civetweb是RGW内置的一个web服务
+
+步骤二：客户端测试（扩展选做实验）
+1）curl测试(client)
+	curl  192.168.4.15:8000
+
+2）使用第三方软件访问登陆node5（RGW）创建账户(node5)
+	radosgw-admin user create --uid="testuser" --display-name="First User"
+	… …
+	"keys": [
+	        {
+	          "user": "testuser",
+	          "access_key": "5E42OEGB1M95Y49IBG7B",
+	          "secret_key": "i8YtM8cs7QDCK3rTRopb0TTPBFJVXdEryRbeLGK6"
+	        }
+	    ],
+	... ...
+	
+	radosgw-admin user info --uid=testuser	//testuser为用户，key是账户访问密钥
+
+3）客户端安装软件(client)
+	yum install s3cmd-2.0.1-1.el7.noarch.rpm
+	修改软件配置（注意，除了下面设置的内容，其他提示都默认回车）
+	s3cmd --configure
+	Access Key: 5E42OEGB1M95Y49IBG7BSecret Key: i8YtM8cs7QDCK3rTRopb0TTPBFJVXdEryRbeLGK6
+	S3 Endpoint [s3.amazonaws.com]: 192.168.4.15:8000
+	[%(bucket)s.s3.amazonaws.com]: %(bucket)s.192.168.4.15:8000
+	Use HTTPS protocol [Yes]: No
+	Test access with supplied credentials? [Y/n] n
+	Save settings? [y/N] y							//注意，其他提示都默认回车
+
+4）创建存储数据的bucket（client）
+  	s3cmd ls
+  	s3cmd mb s3://my_bucket
+  	s3cmd ls
+  	s3cmd put /var/log/messages s3://my_bucket/log/
+  	s3cmd ls
+  	s3cmd ls s3://my_bucket
+  	s3cmd ls s3://my_bucket/log/
+
+	s3cmd get s3://my_bucket/log/messages /tmp/			//测试下载功能
+	s3cmd del s3://my_bucket/log/messages				//测试删除功能
+
+#################################################################################################
+#################################################################################################
+#################################################################################################
